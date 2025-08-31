@@ -1,3 +1,4 @@
+import os
 import json
 import random
 import logging
@@ -19,7 +20,7 @@ from telegram.error import TimedOut, BadRequest
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-BOT_TOKEN = "7954308819:AAEJZoc_WZy2hM8eBFW__raHGTML2GQ5kJU"
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
 DATABASE_FILE = 'anime-offline-database.json'
 
 # --- فرهنگ لغت کامل ---
