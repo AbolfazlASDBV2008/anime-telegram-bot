@@ -10,7 +10,7 @@ from telegram.ext import (
     CommandHandler,
     MessageHandler,
     filters,
-    CallbackContext,
+    ContextTypes,
     InlineQueryHandler,
     CallbackQueryHandler,
 )
@@ -20,8 +20,9 @@ from telegram.error import TimedOut, BadRequest
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-BOT_TOKEN = "7954308819:AAEJZoc_WZy2hM8eBFW__raHGTML2GQ5kJU"
+BOT_TOKEN = "7954308819:AAEJZoc_WZy2hM8eBFW__raHGTML2GQ5kJU"  # توکن ربات خود را اینجا قرار دهید
 DATABASE_FILE = 'anime-offline-database.json'
+DEFAULT_IMAGE = "https://via.placeholder.com/150"  # تصویر پیش‌فرض در صورت خطا
 
 # --- فرهنگ لغت کامل ---
 TRANSLATIONS = {
@@ -42,10 +43,9 @@ TRANSLATIONS = {
         "racing": "مسابقه‌ای", "reincarnation": "تناسخ", "reverse harem": "حرمسرای معکوس", "romantic subtext": "مضامین عاشقانه",
         "samurai": "سامورایی", "school": "مدرسه‌ای", "showbiz": "سرگرمی", "space": "فضایی", "strategy game": "بازی استراتژیک",
         "super power": "قدرت‌های ویژه", "survival": "بقا", "team sports": "ورزش‌های تیمی", "time travel": "سفر در زمان",
-        "urban fantasy": "فانتزی شهری",
-        "vampire": "خون‌آشامی", "video game": "بازی ویدیویی", "villainess": "شخصیت منفی زن", "visual arts": "هنرهای تجسمی",
-        "workplace": "محیط کار",
-        "josei": "جوسی", "kids": "کودکان", "seinen": "سینن", "shoujo": "شوجو", "shounen": "شونن"
+        "urban fantasy": "فانتزی شهری", "vampire": "خون‌آشامی", "video game": "بازی ویدیویی", "villainess": "شخصیت منفی زن",
+        "visual arts": "هنرهای تجسمی", "workplace": "محیط کار", "josei": "جوسی", "kids": "کودکان",
+        "seinen": "سینن", "shoujo": "شوجو", "shounen": "شونن"
     },
     "status": {
         "Finished Airing": "پایان یافته",
@@ -63,9 +63,13 @@ def build_search_index():
     logger.info("در حال ساخت ایندکس جستجو...")
     try:
         with open(DATABASE_FILE, 'r', encoding='utf-8') as f:
-            anime_data = json.load(f)['data']
+            anime_data = json.load(f)
+            if 'data' not in anime_data:
+                logger.error("فایل JSON ساختار مورد انتظار را ندارد.")
+                exit()
+            anime_list = anime_data['data']
         
-        for anime in anime_data:
+        for anime in anime_list:
             mal_id = next((int(s.split('/')[-1]) for s in anime.get('sources', []) if 'myanimelist.net/anime/' in s), None)
             if not mal_id:
                 continue
@@ -75,7 +79,6 @@ def build_search_index():
             all_titles = [anime.get('title', '')] + anime.get('synonyms', [])
             search_string = ' '.join(all_titles).lower()
             
-            # --- *** منطق جدید و هوشمند برای پردازش امتیاز *** ---
             score_data = anime.get('score', 'N/A')
             display_score = 'N/A'
             numeric_score = None
@@ -89,8 +92,8 @@ def build_search_index():
 
             search_index.append({
                 'mal_id': str(mal_id),
-                'title': anime.get('title'),
-                'picture': anime.get('picture'),
+                'title': anime.get('title', 'Unknown'),
+                'picture': anime.get('picture', DEFAULT_IMAGE),
                 'score': display_score,
                 'type': anime.get('type', 'N/A'),
                 'search_string': search_string
@@ -99,19 +102,299 @@ def build_search_index():
     except FileNotFoundError:
         logger.error(f"خطا: فایل دیتابیس '{DATABASE_FILE}' یافت نشد.")
         exit()
+    except json.JSONDecodeError:
+        logger.error(f"خطا: فایل '{DATABASE_FILE}' ساختار JSON معتبر ندارد.")
+        exit()
     except Exception as e:
         logger.error(f"خطا در ساخت ایندکس جستجو: {e}", exc_info=True)
         exit()
 
 # --- توابع کمکی ---
 def jikan_api_request(endpoint: str):
+    """ارسال درخواست به API Jikan با مدیریت خطا."""
     url = f"https://api.jikan.moe/v4/{endpoint}"
     try:
         response = requests.get(url, timeout=20)
-        if response.status_code == 200:
-            return response.json()
-        logger.error(f"خطای API Jikan: Status {response.status_code} برای {url}")
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        logger.error(f"خطا در اتصال به Jikan API ({url}): {e}")
         return None
+
+def get_latest_episode_from_jikan(anime_id: int) -> int | None:
+    """دریافت شماره آخرین قسمت از Jikan API."""
+    page = 1
+    latest_episode_num = 0
+    logger.info(f"[EPISODE_FETCH] شروع جستجو برای آخرین قسمت ID: {anime_id}")
+    try:
+        while True:
+            data = jikan_api_request(f"anime/{anime_id}/episodes?page={page}")
+            if not data or not data.get('data'):
+                break
+            max_in_page = max(ep.get('mal_id', 0) for ep in data['data'])
+            if max_in_page > latest_episode_num:
+                latest_episode_num = max_in_page
+            if not data.get('pagination', {}).get('has_next_page', False):
+                break
+            page += 1
+        logger.info(f"[EPISODE_FETCH] جستجو تمام شد. نتیجه نهایی: {latest_episode_num}")
+        return latest_episode_num if latest_episode_num > 0 else None
+    except Exception as e:
+        logger.error(f"[EPISODE_FETCH] خطا در پردازش قسمت‌ها برای ID {anime_id}: {e}")
+        return None
+
+def translate_text(text: str) -> str:
+    """ترجمه متن به فارسی با مدیریت خطا."""
+    if not text:
+        return "خلاصه داستان موجود نیست."
+    try:
+        return Translator().translate(text, dest='fa').text
+    except Exception as e:
+        logger.error(f"خطا در ترجمه متن: {e}")
+        return f"(ترجمه با خطا مواجه شد)\n\n{text}"
+
+async def send_full_anime_details(chat_id: int, anime_id: int, context: ContextTypes.DEFAULT_TYPE, initial_message=None):
+    """ارسال جزئیات کامل انیمه."""
+    if initial_message:
+        processing_message = initial_message
+        await processing_message.edit_text("در حال دریافت جدیدترین اطلاعات...")
+    else:
+        processing_message = await context.bot.send_message(chat_id=chat_id, text="در حال دریافت جدیدترین اطلاعات...")
+    
+    full_data = jikan_api_request(f"anime/{anime_id}/full")
+    if not full_data or 'data' not in full_data:
+        await processing_message.edit_text("خطا: دریافت اطلاعات از API ممکن نبود.")
+        return
+    
+    jikan_details = full_data['data']
+    
+    title_en = jikan_details.get('title_english') or jikan_details.get('title', 'Unknown')
+    title_jp = jikan_details.get('title_japanese', '')
+    title_display = f"✨ <b>{title_en}</b> ✨\n<i>{title_jp}</i>"
+    
+    studios = jikan_details.get('studios', [])
+    studio_names = ', '.join([s['name'] for s in studios]) or "نامشخص"
+    
+    aired_string = jikan_details.get('aired', {}).get('string', "نامشخص")
+    synopsis_en = jikan_details.get('synopsis', 'خلاصه داستان موجود نیست.')
+    score_val = jikan_details.get('score', 0)
+    score_fa = f"{score_val:.2f} از ۱۰" if score_val else "نامشخص"
+    status_en = jikan_details.get('status', 'Not yet aired')
+    status_fa = TRANSLATIONS['status'].get(status_en, status_en)
+    num_episodes = jikan_details.get('episodes')
+    num_episodes_fa = num_episodes if num_episodes else "نامشخص"
+    
+    all_genres_data = jikan_details.get('genres', []) + jikan_details.get('themes', []) + jikan_details.get('demographics', [])
+    translated_genres = [TRANSLATIONS['genres'].get(g['name'].lower(), g['name']) for g in all_genres_data]
+    genres_fa = ' | '.join(translated_genres) or "نامشخص"
+
+    message_parts = [
+        title_display + "\n",
+        f"📊 <b>امتیاز:</b> {score_fa}",
+        f"📈 <b>وضعیت:</b> {status_fa}",
+        f"🏢 <b>استودیو:</b> {studio_names}",
+        f"🗓️ <b>تاریخ پخش:</b> {aired_string}",
+    ]
+
+    if status_en == "Currently Airing":
+        latest_episode = get_latest_episode_from_jikan(anime_id)
+        if latest_episode:
+            message_parts.append(f"🔥 <b>آخرین قسمت پخش شده:</b> {latest_episode}")
+
+    message_parts.extend([
+        f"🎬 <b>قسمت‌ها:</b> {num_episodes_fa}",
+        f"📺 <b>نوع:</b> {jikan_details.get('type', 'نامشخص')}\n",
+        f"<b>ژانرها:</b>\n{genres_fa}\n",
+        f"📝 <b>خلاصه داستان:</b>\n{translate_text(synopsis_en)}"
+    ])
+    
+    message_text = "\n".join(message_parts)
+    picture_url = jikan_details.get('images', {}).get('jpg', {}).get('large_image_url', DEFAULT_IMAGE)
+    
+    await processing_message.delete()
+
+    try:
+        response = requests.head(picture_url, timeout=5)
+        if response.status_code != 200:
+            logger.warning(f"تصویر در {picture_url} در دسترس نیست، استفاده از تصویر پیش‌فرض.")
+            picture_url = DEFAULT_IMAGE
+        await context.bot.send_photo(chat_id=chat_id, photo=picture_url)
+    except Exception as e:
+        logger.error(f"خطا در ارسال تصویر برای URL {picture_url}: {e}")
+        await context.bot.send_message(chat_id=chat_id, text="تصویر انیمه در دسترس نیست.")
+
+    await context.bot.send_message(chat_id=chat_id, text=message_text, parse_mode=ParseMode.HTML)
+    
+    keyboard = [[
+        InlineKeyboardButton("🤝 انیمه‌های مشابه", callback_data=f"rec_{anime_id}"),
+        InlineKeyboardButton("👥 شخصیت‌ها", callback_data=f"char_{anime_id}")
+    ]]
+    if jikan_details.get('trailer', {}).get('youtube_id'):
+        keyboard.append([InlineKeyboardButton("🎬 نمایش تریلر", url=jikan_details['trailer']['url'])])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await context.bot.send_message(chat_id=chat_id, text="گزینه‌های بیشتر:", reply_markup=reply_markup)
+
+# --- دستورات ---
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_name = update.effective_user.first_name
+    welcome_text = (
+        f"سلام {user_name}! به ربات دستیار انیمه خوش آمدی. 👋\n\n"
+        "من اینجا هستم تا به تو در دنیای بی‌کران انیمه‌ها کمک کنم. تو می‌توانی:\n\n"
+        "🔍 **انیمه‌ها را جستجو کنی:** با استفاده از جستجوی هوشمند، هر انیمه‌ای را فوراً پیدا کن.\n"
+        "🏆 **بهترین‌ها را بشناسی:** لیست برترین انیمه‌های تاریخ را مشاهده کن.\n"
+        "☀️ **به‌روز بمانی:** انیمه‌های جدید هر فصل را دنبال کن.\n\n"
+        "برای دیدن لیست کامل دستورات، کافیه دستور /help را ارسال کنی."
+    )
+    await update.message.reply_text(welcome_text)
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    bot_username = (await context.bot.get_me()).username
+    help_text = (
+        "<b>راهنمای کامل دستورات ربات:</b>\n\n"
+        f"🔹 `@{bot_username} نام انیمه`\n"
+        "<b>(روش اصلی)</b> برای جستجوی هوشمند و زنده هر انیمه‌ای در هر چتی.\n\n"
+        "🔹 /topanime\n"
+        "نمایش لیست ۱۰ انیمه برتر تاریخ از نظر امتیاز.\n\n"
+        "🔹 /seasonal\n"
+        "نمایش انیمه‌های محبوب در حال پخش در فصل فعلی.\n\n"
+        "🔹 /randomanime\n"
+        "دریافت پیشنهاد یک انیمه کاملاً تصادفی برای تماشا."
+    )
+    await update.message.reply_text(help_text, parse_mode=ParseMode.HTML)
+
+async def top_anime(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = await update.message.reply_text("🔝 در حال دریافت ۱۰ انیمه برتر تاریخ...")
+    data = jikan_api_request("top/anime?limit=10")
+    if data and data.get('data'):
+        response_text = "<b>🏆 ۱۰ انیمه برتر تاریخ:</b>\n\n"
+        for i, anime in enumerate(data['data']):
+            response_text += f"{i+1}. {anime.get('title_english') or anime.get('title', 'Unknown')} - امتیاز: {anime.get('score', 0):.2f}\n/anime_{anime['mal_id']}\n\n"
+        await message.edit_text(response_text, parse_mode=ParseMode.HTML)
+    else:
+        await message.edit_text("خطا در دریافت اطلاعات.")
+
+async def seasonal_anime(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = await update.message.reply_text("🏖️ در حال دریافت انیمه‌های فصل جدید...")
+    data = jikan_api_request("seasons/now?limit=15")
+    if data and data.get('data'):
+        response_text = "<b>☀️ انیمه‌های محبوب این فصل:</b>\n\n"
+        for i, anime in enumerate(data['data']):
+            response_text += f"{i+1}. {anime.get('title_english') or anime.get('title', 'Unknown')}\n/anime_{anime['mal_id']}\n\n"
+        await message.edit_text(response_text, parse_mode=ParseMode.HTML)
+    else:
+        await message.edit_text("خطا در دریافت اطلاعات.")
+
+async def random_anime(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = await update.message.reply_text("🎲 در حال انتخاب یک انیمه تصادفی...")
+    data = jikan_api_request("random/anime")
+    if data and data.get('data'):
+        await send_full_anime_details(update.message.chat_id, data['data']['mal_id'], context, initial_message=message)
+    else:
+        await message.edit_text("خطا در دریافت اطلاعات.")
+
+async def get_anime_details_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    try:
+        anime_id = int(update.message.text.split('_')[1])
+        await update.message.delete()
+        await send_full_anime_details(update.message.chat_id, anime_id, context)
+    except (IndexError, ValueError):
+        await update.message.reply_text("خطا: دستور نامعتبر است.")
+
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    action, anime_id_str = query.data.split('_', 1)
+    chat_id = query.message.chat_id
+
+    if action == 'rec':
+        await context.bot.send_message(chat_id=chat_id, text="🔍 در حال یافتن انیمه‌های مشابه...")
+        data = jikan_api_request(f"anime/{anime_id_str}/recommendations")
+        if data and data.get('data'):
+            message = "<b>🤝 انیمه‌های پیشنهادی مشابه:</b>\n\n"
+            for i, rec in enumerate(data['data'][:5]):
+                entry = rec['entry']
+                message += f"{i+1}. {entry.get('title', 'Unknown')}\n/anime_{entry['mal_id']}\n\n"
+            await context.bot.send_message(chat_id=chat_id, text=message, parse_mode=ParseMode.HTML)
+        else:
+            await context.bot.send_message(chat_id=chat_id, text="انیمه مشابهی یافت نشد.")
+    
+    elif action == 'char':
+        await context.bot.send_message(chat_id=chat_id, text="👥 در حال دریافت لیست شخصیت‌ها...")
+        data = jikan_api_request(f"anime/{anime_id_str}/characters")
+        if data and data.get('data'):
+            for i, item in enumerate(data['data'][:7]):
+                char = item['character']
+                img_url = char.get('images', {}).get('jpg', {}).get('image_url', DEFAULT_IMAGE)
+                caption = f"<b>{char.get('name', 'Unknown')}</b>\n<i>{item.get('role', 'Unknown')}</i>"
+                try:
+                    response = requests.head(img_url, timeout=5)
+                    if response.status_code != 200:
+                        logger.warning(f"تصویر شخصیت در {img_url} در دسترس نیست، استفاده از تصویر پیش‌فرض.")
+                        img_url = DEFAULT_IMAGE
+                    await context.bot.send_photo(chat_id=chat_id, photo=img_url, caption=caption, parse_mode=ParseMode.HTML)
+                except (BadRequest, TimedOut, requests.RequestException) as e:
+                    logger.error(f"خطا در ارسال تصویر شخصیت برای URL {img_url}: {e}")
+                    await context.bot.send_message(chat_id=chat_id, text=caption + " (عکس ناموفق بود)", parse_mode=ParseMode.HTML)
+        else:
+            await context.bot.send_message(chat_id=chat_id, text="شخصیتی یافت نشد.")
+
+async def inline_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.inline_query.query.lower()
+    if not query or len(query) < 3:
+        await update.inline_query.answer([], cache_time=10)
+        return
+    
+    results = []
+    found_ids = set()
+    
+    for item in search_index:
+        if query in item['search_string']:
+            if item['mal_id'] in found_ids:
+                continue
+            description_text = f"امتیاز: {item['score']} | نوع: {item['type']}"
+            results.append(
+                InlineQueryResultArticle(
+                    id=item['mal_id'],
+                    title=item['title'],
+                    thumb_url=item['picture'],
+                    description=description_text,
+                    input_message_content=InputTextMessageContent(f"/anime_{item['mal_id']}")
+                )
+            )
+            found_ids.add(item['mal_id'])
+            if len(results) >= 15:
+                break
+    
+    try:
+        await update.inline_query.answer(results, cache_time=5)
+    except TimedOut:
+        logger.warning("TimedOut در جستجوی inline.")
+
+async def main() -> None:
+    """اجرای ربات."""
+    try:
+        build_search_index()
+        application = Application.builder().token(BOT_TOKEN).build()
+        
+        application.add_handler(CommandHandler("start", start))
+        application.add_handler(CommandHandler("help", help_command))
+        application.add_handler(CommandHandler("topanime", top_anime))
+        application.add_handler(CommandHandler("seasonal", seasonal_anime))
+        application.add_handler(CommandHandler("randomanime", random_anime))
+        application.add_handler(InlineQueryHandler(inline_search))
+        application.add_handler(MessageHandler(filters.Regex(r'^/anime_\d+$'), get_anime_details_command))
+        application.add_handler(CallbackQueryHandler(button_handler))
+
+        logger.info("ربات بی‌نقص و نهایی اجرا شد!")
+        await application.run_polling(allowed_updates=Update.ALL_TYPES)
+    except Exception as e:
+        logger.error(f"خطا در اجرای ربات: {e}", exc_info=True)
+        exit()
+
+if __name__ == '__main__':
+    import asyncio
+    asyncio.run(main())        return None
     except requests.exceptions.RequestException as e:
         logger.error(f"خطا در اتصال به Jikan API ({url}): {e}")
         return None
