@@ -1,117 +1,66 @@
-import json
-import random
 import logging
-import requests
-from googletrans import Translator
-from telegram import Update, InlineQueryResultArticle, InputTextMessageContent, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.constants import ParseMode
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    filters,
-    ContextTypes,
-    InlineQueryHandler,
-    CallbackQueryHandler,
-)
-from telegram.error import TimedOut, BadRequest
+import asyncio
+import nest_asyncio  # ۱. این خط را اضافه کنید
 
-# --- تنظیمات اولیه ---
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+
+nest_asyncio.apply()  # ۲. این خط را بلافاصله بعد از ایمپورت‌ها اضافه کنید
+
+# توکن ربات خود را اینجا قرار دهید
+BOT_TOKEN = "7786055414:AAFyFoAP-dLSXUa2nn8vOaD_0ubk5oaUGcE"
+
+# ... بقیه کد شما دقیقاً مثل قبل و بدون هیچ تغییری باقی می‌ماند ...
+
+# فعال‌سازی لاگ‌ها
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+)
 logger = logging.getLogger(__name__)
 
-BOT_TOKEN = "7954308819:AAEJZoc_WZy2hM8eBFW__raHGTML2GQ5kJU"  # توکن ربات خود را اینجا قرار دهید
-DATABASE_FILE = 'anime-offline-database.json'
-DEFAULT_IMAGE = "https://via.placeholder.com/150"  # تصویر پیش‌فرض در صورت خطا
 
-# --- فرهنگ لغت کامل ---
-TRANSLATIONS = {
-    "genres": {
-        "action": "اکشن", "adventure": "ماجراجویی", "avant garde": "آوانگارد", "award winning": "برنده جایزه",
-        "comedy": "کمدی", "drama": "درام", "fantasy": "فانتزی", "horror": "ترسناک", "mystery": "رازآلود",
-        "romance": "عاشقانه", "sci-fi": "علمی تخیلی", "slice of life": "برشی از زندگی", "sports": "ورزشی",
-        "supernatural": "ماوراء طبیعی", "suspense": "تعلیق‌آمیز", "ecchi": "اچی", "erotica": "اروتیک",
-        "gourmet": "آشپزی", "hentai": "هنتای", "boys love": "عشق پسرانه", "girls love": "عشق دخترانه",
-        "adult cast": "شخصیت‌های بزرگسال", "anthropomorphic": "انسان‌انگاری", "cgi": "سی‌جی‌آی", "childcare": "مراقبت از کودک",
-        "combat sports": "ورزش‌های رزمی", "delinquents": "بزه‌کاران", "detective": "کارآگاهی", "educational": "آموزشی",
-        "gag humor": "کمدی کلامی", "genderswap": "تغییر جنسیت", "gore": "خون و خونریزی", "harem": "حرمسرا",
-        "high stakes game": "بازی‌های پرخطر", "historical": "تاریخی", "idols (female)": "آیدل (دختر)", "idols (male)": "آیدل (پسر)",
-        "isekai": "ایسکای", "iyashikei": "آرامش‌بخش", "love polygon": "چندضلعی عشقی", "magical sex shift": "تغییر جنسیت جادویی",
-        "mahjong": "ماهجونگ", "martial arts": "هنرهای رزمی", "mecha": "مکا", "medical": "پزشکی", "military": "نظامی",
-        "music": "موسیقی", "mythology": "اسطوره‌شناسی", "organized crime": "جرایم سازمان‌یافته", "parody": "نقیضه",
-        "performing arts": "هنرهای نمایشی", "pets": "حیوانات خانگی", "police": "پلیسی", "psychological": "روانشناختی",
-        "racing": "مسابقه‌ای", "reincarnation": "تناسخ", "reverse harem": "حرمسرای معکوس", "romantic subtext": "مضامین عاشقانه",
-        "samurai": "سامورایی", "school": "مدرسه‌ای", "showbiz": "سرگرمی", "space": "فضایی", "strategy game": "بازی استراتژیک",
-        "super power": "قدرت‌های ویژه", "survival": "بقا", "team sports": "ورزش‌های تیمی", "time travel": "سفر در زمان",
-        "urban fantasy": "فانتزی شهری", "vampire": "خون‌آشامی", "video game": "بازی ویدیویی", "villainess": "شخصیت منفی زن",
-        "visual arts": "هنرهای تجسمی", "workplace": "محیط کار", "josei": "جوسی", "kids": "کودکان",
-        "seinen": "سینن", "shoujo": "شوجو", "shounen": "شونن"
-    },
-    "status": {
-        "Finished Airing": "پایان یافته",
-        "Currently Airing": "در حال پخش",
-        "Not yet aired": "هنوز پخش نشده"
-    }
-}
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text("سلام! هر فایلی را برای من فوروارد کن تا لینک دانلود مستقیم (و موقت) آن را به تو بدهم.")
 
-# --- موتور جستجوی داخلی ---
-anime_by_id = {}
-search_index = []
 
-def build_search_index():
-    """یک بار در شروع، دیتابیس را برای جستجوی سریع آماده می‌کند."""
-    logger.info("در حال ساخت ایندکس جستجو...")
+async def generate_direct_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    file_to_process = (
+        update.message.document
+        or update.message.video
+        or update.message.audio
+        or (update.message.photo[-1] if update.message.photo else None)
+    )
+
+    if not file_to_process:
+        await update.message.reply_text("لطفاً یک فایل ارسال کنید.")
+        return
+
     try:
-        with open(DATABASE_FILE, 'r', encoding='utf-8') as f:
-            anime_data = json.load(f)
-            if 'data' not in anime_data:
-                logger.error("فایل JSON ساختار مورد انتظار را ندارد.")
-                exit()
-            anime_list = anime_data['data']
+        await update.message.reply_text("در حال ساخت لینک...")
+        file_info = await context.bot.get_file(file_to_process.file_id)
         
-        for anime in anime_list:
-            mal_id = next((int(s.split('/')[-1]) for s in anime.get('sources', []) if 'myanimelist.net/anime/' in s), None)
-            if not mal_id:
-                continue
-                
-            anime_by_id[mal_id] = anime
-
-            all_titles = [anime.get('title', '')] + anime.get('synonyms', [])
-            search_string = ' '.join(all_titles).lower()
-            
-            score_data = anime.get('score', 'N/A')
-            display_score = 'N/A'
-            numeric_score = None
-            if isinstance(score_data, dict):
-                numeric_score = score_data.get('arithmeticMean')
-            elif isinstance(score_data, (int, float)):
-                numeric_score = score_data
-            
-            if numeric_score is not None:
-                display_score = f"{numeric_score:.1f}"
-
-            search_index.append({
-                'mal_id': str(mal_id),
-                'title': anime.get('title', 'Unknown'),
-                'picture': anime.get('picture', DEFAULT_IMAGE),
-                'score': display_score,
-                'type': anime.get('type', 'N/A'),
-                'search_string': search_string
-            })
-        logger.info(f"ایندکس جستجو با موفقیت برای {len(search_index)} انیمه ساخته شد.")
-    except FileNotFoundError:
-        logger.error(f"خطا: فایل دیتابیس '{DATABASE_FILE}' یافت نشد.")
-        exit()
-    except json.JSONDecodeError:
-        logger.error(f"خطا: فایل '{DATABASE_FILE}' ساختار JSON معتبر ندارد.")
-        exit()
+        direct_temporary_link = file_info.file_path
+        
+        await update.message.reply_text(
+            "لینک شما آماده است. آن را کپی کرده و در دانلود منیجر خود Paste کنید:\n\n"
+            f"`{direct_temporary_link}`",
+            parse_mode='Markdown'
+        )
     except Exception as e:
-        logger.error(f"خطا در ساخت ایندکس جستجو: {e}", exc_info=True)
-        exit()
+        logger.error(f"خطا در ایجاد لینک: {e}")
+        await update.message.reply_text("خطایی در ایجاد لینک رخ داد.")
 
-# --- توابع کمکی ---
-def jikan_api_request(endpoint: str):
-    """ارسال درخواست به API Jikan با مدیریت خطا."""
+
+async def main() -> None:
+    application = Application.builder().token(BOT_TOKEN).build()
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(MessageHandler(filters.ATTACHMENT & ~filters.COMMAND, generate_direct_link))
+    print("ربات در حال اجراست...")
+    await application.run_polling()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())    """ارسال درخواست به API Jikan با مدیریت خطا."""
     url = f"https://api.jikan.moe/v4/{endpoint}"
     try:
         response = requests.get(url, timeout=20)
